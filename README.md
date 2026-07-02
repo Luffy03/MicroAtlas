@@ -35,7 +35,7 @@ Install additional dependencies:
 
 ## Quick start <a name="QuickStart"></a>
 
-You can download our model from [Google drive](https://drive.google.com/file/d/1N68Cjn34_KL7ZblFXmk_QLX4bMk-tcVe/view?usp=sharing) and place it at 'src/microatlas/'.
+You can download our model from [huggingface](https://huggingface.co/MicroAtlas/microatlas-model) and place it at 'src/microatlas/'.
 
 ### Inference
 

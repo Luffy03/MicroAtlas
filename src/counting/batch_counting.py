@@ -46,32 +46,16 @@ DATASET_CONFIGS = {
         "counts_file": str(BBBC_ROOT / "BBBC001" / "BBBC001_v1_counts.txt"),
         "n_images": 6,
     },
-    "BBBC002": {
-        "image_dir": str(BBBC_ROOT / "BBBC002" / "BBBC002_v1_images" / "drosophila_kc167_1_images"),
-        "counts_file": str(BBBC_ROOT / "BBBC002" / "BBBC002_v1_counts.txt"),
-        "n_images": 50,
-    },
-    "BBBC003": {
-        "image_dir": str(BBBC_ROOT / "BBBC003" / "BBBC003_v1_images" / "mouse_embryos_dic_images"),
-        "counts_file": str(BBBC_ROOT / "BBBC003" / "BBBC003_v1_counts.txt"),
-        "n_images": 15,
-    },
-    "BBBC005": {
-        "image_dir": str(BBBC_ROOT / "BBBC005" / "BBBC005_v1_images"),
-        "counts_file": str(BBBC_ROOT / "BBBC005" / "BBBC005_v1_counts.txt"),
-        "n_images": 9600,
-    },
-    "BBBC006": {
-        "image_dir": str(BBBC_ROOT / "BBBC006" / "BBBC006_v1_images"),
-        "counts_file": str(BBBC_ROOT / "BBBC006" / "BBBC006_v1_counts.txt"),
-        "n_images": 768,
+    "BBBC039": {
+        "image_dir": str(BBBC_ROOT / "BBBC039" / "images"),
+        "counts_file": str(BBBC_ROOT / "BBBC039" / "BBBC039_v1_counts.txt"),
+        "n_images": 200,
     },
     "BBBC041": {
         "image_dir": str(BBBC_ROOT / "BBBC041" / "malaria" / "images"),
         "counts_file": str(BBBC_ROOT / "BBBC041" / "BBBC041_v1_counts.txt"),
         "n_images": 1328,
     },
-
 }
 
 
@@ -201,7 +185,7 @@ def save_excel_summary(results, output_root):
     # Group results by model
     model_order = ["cellpose4", "cellpose3", "microatlas", "microsam", "cellsam"]
     model_data = {m: {} for m in model_order}  # model -> {dataset: metrics_dict}
-    dataset_order = ["BBBC001", "BBBC002", "BBBC003", "BBBC005", "BBBC006", "BBBC041"]
+    dataset_order = ["BBBC001", "BBBC039", "BBBC041"]
 
     for r in results:
         m = r["model"]
@@ -611,7 +595,7 @@ Examples:
             model_name = parts[1]
 
             # Skip removed datasets
-            if dataset_name == "BBBC039":
+            if dataset_name not in DATASET_CONFIGS:
                 continue
 
             metrics_dir = ds_dir / "results_metrics"

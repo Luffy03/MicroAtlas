@@ -30,10 +30,7 @@ def get_image_dir_map(bbbc_root):
     root = Path(bbbc_root)
     return {
         "BBBC001": root / "BBBC001" / "BBBC001_v1_images_tif" / "human_ht29_colon_cancer_1_images",
-        "BBBC002": root / "BBBC002" / "BBBC002_v1_images" / "drosophila_kc167_1_images",
-        "BBBC003": root / "BBBC003" / "BBBC003_v1_images" / "mouse_embryos_dic_images",
-        "BBBC005": root / "BBBC005" / "BBBC005_v1_images",
-        "BBBC006": root / "BBBC006" / "BBBC006_v1_images",
+        "BBBC039": root / "BBBC039" / "images",
         "BBBC041": root / "BBBC041" / "malaria" / "images",
     }
 
@@ -44,7 +41,7 @@ def get_image_dir_map(bbbc_root):
 def load_counts(counts_path):
     """Load ground truth counts from a *_v1_counts.txt file.
 
-    For BBBC001 and BBBC002 which have 2 manual counts, the GT is the average.
+    For BBBC001 which has 2 manual counts, the GT is the average.
 
     Parameters
     ----------
@@ -67,10 +64,10 @@ def load_counts(counts_path):
         parts = line.split("\t")
         fname = parts[0]
         if n_cols == 2:
-            # Single manual count (BBBC003, BBBC041)
+            # Single manual count (BBBC039, BBBC041)
             gt = float(parts[1])
         else:
-            # Two manual counts (BBBC001, BBBC002) — average them
+            # Two manual counts (BBBC001) — average them
             vals = [float(p) for p in parts[1:] if p]
             gt = float(np.mean(vals))
         counts[fname] = gt

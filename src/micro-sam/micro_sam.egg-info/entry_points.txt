@@ -1,0 +1,14 @@
+[console_scripts]
+micro_sam.annotator_2d = micro_sam.sam_annotator.annotator_2d:main
+micro_sam.annotator_3d = micro_sam.sam_annotator.annotator_3d:main
+micro_sam.annotator_tracking = micro_sam.sam_annotator.annotator_tracking:main
+micro_sam.automatic_segmentation = micro_sam.automatic_segmentation:main
+micro_sam.benchmark_sam = micro_sam.evaluation.benchmark_datasets:main
+micro_sam.evaluate = micro_sam.evaluation.evaluation:main
+micro_sam.image_series_annotator = micro_sam.sam_annotator.image_series_annotator:main
+micro_sam.info = micro_sam.util:micro_sam_info
+micro_sam.precompute_embeddings = micro_sam.precompute_state:main
+micro_sam.train = micro_sam.training.training:main
+
+[napari.manifest]
+micro-sam = micro_sam:napari.yaml

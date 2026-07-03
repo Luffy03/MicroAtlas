@@ -287,7 +287,7 @@ All scripts support `--models` to specify one or more models (`cellpose4`, `cell
 python src/morphology_profiling/preprocess.py
 ```
 
-**Step 2 — Segmentation:** Run instance segmentation on the DAPI channel for all fields.
+**Step 2 — Segmentation:** Run instance segmentation for all fields.
 
 ```bash
 python src/morphology_profiling/segment.py --models microatlas --all

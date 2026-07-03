@@ -258,7 +258,7 @@ python spatial_analysis/Xenium/eval.py --project all --models all
 
 ### Morphological profiling
 
-Morphological profiling evaluation uses the **BBBC021 dataset** from the [Broad Bioimage Benchmark Collection](https://bbbc.broadinstitute.org/BBBC021), a high-throughput fluorescence microscopy screen of MCF-7 breast cancer cells stained with three channels (DAPI, Actin, Tubulin). A library of 113 compounds was assayed at 8 concentrations across 13,200 fields (~44 GB). 38 compounds (103 compound–concentration pairs) are annotated with one of 12 Mechanisms of Action (MoA), plus DMSO as negative control. The pipeline benchmarks five segmentation models on DAPI (nuclear) channel for their ability to preserve morphological signal, measured by how well downstream unsupervised clustering separates MoA classes.
+Morphological profiling evaluation uses the **BBBC021 dataset** from the [Broad Bioimage Benchmark Collection](https://bbbc.broadinstitute.org/BBBC021), a high-throughput fluorescence microscopy screen of MCF-7 breast cancer cells stained with three channels (DAPI, Actin, Tubulin). A library of 113 compounds was assayed at 8 concentrations across 13,200 fields (~44 GB). 38 compounds (103 compound–concentration pairs) are annotated with one of 12 Mechanisms of Action (MoA), plus DMSO as negative control. The pipeline benchmarks five segmentation models for their ability to preserve morphological signal, measured by how well downstream unsupervised clustering separates MoA classes.
 
 #### Download data
 

@@ -384,7 +384,7 @@ Output per model saved under `src/phenotyping/eval_results/{model_name}/`:
 ## Acknowledgement <a name="Acknowledgment"></a>
 
 Our dataset is collected from the [**OpenMicroscopy platform**](https://idr.openmicroscopy.org/).
-Our model is developed on the famous [**Cellpose**](https://github.com/MouseLand/cellpose). We highly appreciate their great efforts. 
+Our model is developed on the prestigious [**Cellpose**](https://github.com/MouseLand/cellpose). We highly appreciate their great efforts. 
 
 
 

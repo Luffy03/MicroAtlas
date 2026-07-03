@@ -39,6 +39,8 @@ You can download our model from [huggingface](https://huggingface.co/MicroAtlas/
 
 ### Inference
 
+#### Python API
+
 ```python
 from cellpose import models
 
@@ -48,6 +50,36 @@ model = models.CellposeModel(gpu=True, pretrained_model='./microatlas/microatlas
 # Run segmentation
 masks = model.eval(img, diameter=None, channels=None, bsize=256)[0]
 ```
+
+#### Cellpose GUI
+
+MicroAtlas can be used directly in the Cellpose GUI for interactive segmentation:
+
+1. Launch the GUI:
+   ```bash
+   python -m cellpose --gui
+   ```
+2. In the menu bar, go to **Models → Add model**.
+3. Navigate to `src/microatlas/` and select the `microatlas` model file.
+4. The model will appear in the **user-trained models** dropdown. Select it and click **run** to segment the loaded image.
+
+> **Note:** The GUI requires `cellpose[gui]` to be installed (see [Installation](#Installation)).
+
+#### napari
+
+Alternatively, you can use MicroAtlas in [**napari**](https://napari.org/) via the `cellpose-napari` plugin, which provides better multi-dimensional visualization and a richer plugin ecosystem:
+
+```bash
+python -m pip install napari[all] cellpose-napari
+```
+
+1. Launch napari:
+   ```bash
+   napari
+   ```
+2. Open **Plugins → cellpose-napari**.
+3. Set **Model type** to `custom` and point to `src/microatlas/microatlas`.
+4. Click **Run segmentation**. The result appears as a labels layer that you can edit directly with napari's brush tools.
 
 ### Dataset download
 

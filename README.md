@@ -171,7 +171,7 @@ Key arguments:
 |---|----------------|---|
 | `--root` | `./microatlas` | Data and model output root directory |
 | `--n_epochs` | `500`          | Number of training epochs |
-| `--learning_rate` | `5e-5`         | Learning rate (with warm-up + cosine decay) |
+| `--learning_rate` | `1e-4`         | Learning rate (with warm-up + cosine decay) |
 | `--batch_size` | `8`            | Batch size per GPU |
 | `--gram_weight` | `1.0`          | Weight for Gram consistency loss |
 | `--ddp` | `1`            | Use DistributedDataParallel (1) or DataParallel (0) |

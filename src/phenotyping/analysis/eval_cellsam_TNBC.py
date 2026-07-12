@@ -31,7 +31,7 @@ def segment_with_cellsam(image, device='cuda'):
         return None
 
     try:
-        mask = cellsam_pipeline(image, use_wsi=False,
+        mask = cellsam_pipeline(image, use_wsi=True,
                                 low_contrast_enhancement=False,
                                 gauge_cell_size=False)
         if mask is None:

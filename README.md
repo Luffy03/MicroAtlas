@@ -198,6 +198,20 @@ python eval/eval_cellsam.py
 python eval/eval_microsam.py
 ```
 
+### SPATCH benchmark
+
+Cell segmentation evaluation on 12 spatial transcriptomics datasets (4 platforms × 3 cancer types), measured by AP@0.5. Data is organized under `src/spatch/` with `tile*.png` images and `mask*.json` annotations. The datasets are from [SPATCH](https://spatch.pku-genomics.org). 
+
+```bash
+cd src
+
+# Evaluate all models (microatlas, cellpose4, cellpose3, cellsam, microsam)
+python spatch/eval_spatch.py
+
+# Evaluate specific models
+python spatch/eval_spatch.py --models microatlas cellpose4
+```
+
 ### Counting evaluation
 
 Cell counting evaluation uses three [BBBC](https://bbbc.broadinstitute.org/) datasets (BBBC001, BBBC039, BBBC041). Dataset zip files are included under `src/counting/BBBC/`:

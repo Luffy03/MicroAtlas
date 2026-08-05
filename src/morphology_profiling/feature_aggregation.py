@@ -12,8 +12,8 @@ Pipeline:
   6. Output: treatment-level profiles for biomarker discovery
 
 Usage:
-  python biomarker_discovery/feature_aggregation.py
-  python biomarker_discovery/feature_aggregation.py --plates Week1_22123 Week1_22141
+  python src/morphology_profiling/feature_aggregation.py
+  python src/morphology_profiling/feature_aggregation.py --plates P015080 P015081
 """
 
 import argparse
@@ -180,16 +180,19 @@ def join_treatment_metadata(field_profiles, image_df=None):
 
     # Build field -> treatment mapping from image_df
     # Map: (plate, field_key) -> compound, concentration, moa, is_dmso
-    # field_key = plate_well_site (e.g. G10_s1), extracted from DAPI filename
+    # field_key = well_site (e.g. A01_s1); preprocess.py provides it directly
+    # in the 'field' column, else fall back to parsing a channel filename.
     import re
     field_meta = {}
     for _, row in image_df.iterrows():
         plate = row.get('plate', '')
-        dapi_file = row.get('Image_FileName_DAPI', '')
-        if dapi_file:
-            # Extract field key: G10_s1_w1UUID.tif -> G10_s1
-            m = re.match(r'^(.+?)_w\d+', str(dapi_file))
-            field_key = m.group(1) if m else str(dapi_file).replace('.tif', '').replace('.tiff', '')
+        field_key = row.get('field', '')
+        if not field_key:
+            dapi_file = row.get('Image_FileName_DAPI', '')
+            if dapi_file:
+                m = re.match(r'^(.+?)_w\d+', str(dapi_file))
+                field_key = m.group(1) if m else str(dapi_file).replace('.tif', '').replace('.tiff', '')
+        if field_key:
             key = (plate, field_key)
             field_meta[key] = {
                 'compound': row.get('compound', ''),
@@ -227,46 +230,77 @@ def join_treatment_metadata(field_profiles, image_df=None):
 
 
 def robust_zscore_normalize(field_profiles):
-    """Normalize features using robust z-score vs DMSO controls.
+    """Normalize features using robust z-score vs DMSO controls, per plate.
 
-    For each feature:
-      z = (x - median_DMSO) / MAD_DMSO
+    For each feature, within each plate:
+      z = (x - median_DMSO_plate) / MAD_DMSO_plate
+
+    Normalizing against each plate's own DMSO controls removes plate-to-plate
+    technical variation (batch effect). When several replicate plates are
+    pooled, a single global DMSO baseline leaves that batch effect in the
+    feature space and lets it dominate the downstream UMAP/clustering; a
+    per-plate baseline cancels it. For a single plate this is identical to the
+    previous global normalization (that plate's DMSO == the global DMSO).
+
+    Fallback order per plate: this plate's DMSO -> global DMSO (all plates) ->
+    global all-field median/MAD, so a plate with too few DMSO fields is still
+    normalized on a stable baseline.
 
     Args:
         field_profiles: DataFrame with field-level features + is_dmso column
+            (and a 'plate' column for per-plate grouping)
 
     Returns:
         DataFrame with z-scored features (original features replaced)
     """
     feat_cols = get_feature_columns(field_profiles)
-    dmso_mask = field_profiles['is_dmso'] == True
-    n_dmso = dmso_mask.sum()
-    print(f"\n  Robust z-score normalization vs {n_dmso} DMSO fields...")
-
-    if n_dmso < 5:
-        print(f"  [WARN] Very few DMSO controls ({n_dmso}). "
-              f"Falling back to global median/MAD.")
-        dmso_mask = pd.Series(True, index=field_profiles.index)
-
     result = field_profiles.copy()
 
-    for col in feat_cols:
-        dmso_vals = field_profiles.loc[dmso_mask, col].values.astype(np.float64)
-        dmso_vals = dmso_vals[np.isfinite(dmso_vals)]
+    has_plate = 'plate' in field_profiles.columns
+    plates = field_profiles['plate'].unique() if has_plate else [None]
 
-        if len(dmso_vals) == 0:
-            result[col] = np.nan
-            continue
+    # Global DMSO fallback (used when a plate has too few DMSO controls).
+    global_dmso_mask = field_profiles['is_dmso'] == True
+    n_global_dmso = int(global_dmso_mask.sum())
+    print(f"\n  Robust z-score normalization (per-plate) across "
+          f"{len(plates)} plate(s), {n_global_dmso} DMSO fields total...")
 
-        dmso_med = np.median(dmso_vals)
-        dmso_mad = np.median(np.abs(dmso_vals - dmso_med))
+    for plate in plates:
+        plate_mask = (field_profiles['plate'] == plate) if has_plate \
+            else pd.Series(True, index=field_profiles.index)
 
-        if dmso_mad < 1e-10:
-            # Avoid division by zero: use std instead
-            dmso_mad = np.std(dmso_vals) + 1e-10
+        dmso_mask = plate_mask & (field_profiles['is_dmso'] == True)
+        n_dmso = int(dmso_mask.sum())
 
-        all_vals = result[col].values.astype(np.float64)
-        result[col] = (all_vals - dmso_med) / dmso_mad
+        if n_dmso < 5:
+            if n_global_dmso >= 5:
+                print(f"  [WARN] Plate {plate}: only {n_dmso} DMSO fields; "
+                      f"using global DMSO ({n_global_dmso}) baseline.")
+                ref_mask = global_dmso_mask
+            else:
+                print(f"  [WARN] Plate {plate}: only {n_dmso} DMSO fields and "
+                      f"few global DMSO; using global median/MAD.")
+                ref_mask = pd.Series(True, index=field_profiles.index)
+        else:
+            ref_mask = dmso_mask
+
+        for col in feat_cols:
+            ref_vals = field_profiles.loc[ref_mask, col].values.astype(np.float64)
+            ref_vals = ref_vals[np.isfinite(ref_vals)]
+
+            if len(ref_vals) == 0:
+                result.loc[plate_mask, col] = np.nan
+                continue
+
+            med = np.median(ref_vals)
+            mad = np.median(np.abs(ref_vals - med))
+
+            if mad < 1e-10:
+                # Avoid division by zero: use std instead
+                mad = np.std(ref_vals) + 1e-10
+
+            vals = field_profiles.loc[plate_mask, col].values.astype(np.float64)
+            result.loc[plate_mask, col] = (vals - med) / mad
 
     print(f"  Normalized {len(feat_cols)} features")
     return result

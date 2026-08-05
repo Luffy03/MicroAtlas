@@ -1,12 +1,29 @@
 """
 config.py
 =========
-Configuration for BBBC021 Biomarker Discovery pipeline.
+Configuration for the U2OS-Cell-Painting Biomarker Discovery pipeline.
 
-Dataset: Human MCF-7 breast cancer cells treated with 113 compounds
-         at 8 concentrations, 3-channel fluorescence imaging.
-         103 compound-concentrations annotated with 12 MoA classes.
-Source:  https://bbbc.broadinstitute.org/BBBC021
+Dataset: Human U2OS osteosarcoma cells treated with 231 compounds spanning 10
+         mechanism-of-action (MoA) classes (plus DMSO negative controls), imaged
+         with 5-channel Cell Painting fluorescence microscopy. Compounds were
+         dosed at 10 uM for 48 h in 384-well plates, replicated 6x and spread
+         across 18 microplates. Images are 16-bit, 2160x2160, 5 sites/well.
+Source:  figshare record 21378906, DOI 10.17044/scilifelab.21378906 (CC BY 4.0),
+         Uppsala University. Each plate is one tar.gz containing FL (5 channels)
+         and BF (6 z-planes); this pipeline uses only the FL channels.
+Papers:  Gupta/Harrison 2022 (bioRxiv 2022.10.12.511869) and
+         Tian/Harrison 2023 (AILS, 10.1016/j.ailsci.2023.100060). BOTH papers do
+         SUPERVISED MoA classification (ResNet-50 / EfficientNet-B1). This
+         pipeline instead performs UNSUPERVISED morphological clustering, so the
+         numbers here are NOT comparable to the papers' supervised scores.
+
+This config feeds the shared downstream
+pipeline (segment -> feature_extraction -> feature_aggregation -> biomarker).
+Key characteristics of this dataset:
+  - Images come from figshare per-plate tar.gz archives (not the S3 gallery)
+  - MoA labels + per-channel filenames come from fl_data.csv (no external join)
+  - 10 balanced MoA classes -> DEFAULT_N_CLUSTERS = 10
+  - 5 fluorescence channels ordered C1..C5 = DNA, Mito, AGP, RNA, ER
 """
 
 import os
@@ -23,8 +40,11 @@ CELLPOSE_ROOT = PROJECT_ROOT.parent  # ~/Cellpose
 DATA_ROOT = PROJECT_ROOT / "data"
 IMAGES_DIR = DATA_ROOT / "images"
 METADATA_DIR = DATA_ROOT / "metadata"
+# Scratch directory for per-plate tar.gz archives (deleted after extraction).
+ARCHIVE_DIR = DATA_ROOT / "archives"
 # Results base directory
 RESULTS_DIR = PROJECT_ROOT / "results"
+
 
 # Model-aware path functions
 def masks_dir(model_name="cellpose4"):
@@ -53,95 +73,129 @@ FEATURES_DIR = features_dir("cellpose4")
 BIOMARKER_DIR = biomarker_dir("cellpose4")
 VIS_DIR = vis_dir("cellpose4")
 
-# Metadata files
-IMAGE_CSV = METADATA_DIR / "BBBC021_v1_image.csv"
-COMPOUND_CSV = METADATA_DIR / "BBBC021_v1_compound.csv"
-MOA_CSV = METADATA_DIR / "BBBC021_v1_moa.csv"
+# Authoritative metadata table (extracted from data_tables.tar.gz). Provides
+# plate, well, site, bf_site, compound, C1..C5 filenames and the single MoA
+# label per field -- no external platemap/compound join is needed.
+FL_DATA_CSV = METADATA_DIR / "fl_data.csv"
+BF_DATA_CSV = METADATA_DIR / "bf_data.csv"
 
 # =========================================================================
-# BBBC021 Channel definitions
+# Channel definitions (Cell Painting, 5 fluorescence channels)
 # =========================================================================
+# Channel order matches the C1..C5 columns / _w1.._w5 filename tokens in
+# fl_data.csv. The stain assignment is fixed by the paper's acquisition setup
+# (excitation order Hoechst, MitoTracker, Phalloidin+WGA, SYTO14, ConA) which
+# is identical to the CorrectIllumination module order in the authors'
+# CellProfiler pipeline (HOECHST, MITO, PHAandWGA, SYTO, CONC). ImageXpress
+# writes the wavelength index (_w1.._w5) in that acquisition order.
+# NOTE: the brightfield (BF) z-planes are intentionally ignored.
 
 CHANNELS = {
-    "DAPI": {"description": "DNA stain (Hoechst/DAPI)", "organelle": "Nucleus"},
-    "Actin": {"description": "F-actin (phalloidin)", "organelle": "Cytoskeleton"},
-    "Tubulin": {"description": "beta-tubulin", "organelle": "Microtubules"},
+    "DNA":  {"description": "DNA stain (Hoechst 33342)",                 "organelle": "Nucleus"},
+    "Mito": {"description": "Mitochondria (MitoTracker Deep Red)",       "organelle": "Mitochondria"},
+    "AGP":  {"description": "Actin/Golgi/plasma membrane (Phalloidin + WGA)", "organelle": "Cytoskeleton / membrane"},
+    "RNA":  {"description": "RNA (SYTO 14)",                             "organelle": "Nucleoli / cytoplasmic RNA"},
+    "ER":   {"description": "Endoplasmic reticulum (Concanavalin A / Alexa 488)", "organelle": "ER"},
 }
 
-CHANNEL_NAMES = list(CHANNELS.keys())  # ["DAPI", "Actin", "Tubulin"]
-NUCLEUS_CHANNEL = "DAPI"
+CHANNEL_NAMES = list(CHANNELS.keys())  # ["DNA", "Mito", "AGP", "RNA", "ER"]
+NUCLEUS_CHANNEL = "DNA"
+
+# fl_data.csv column giving the raw TIFF filename for each channel.
+CHANNEL_CSV_COLS = {
+    "DNA":  "C1",   # Hoechst      (w1)
+    "Mito": "C2",   # MitoTracker  (w2)
+    "AGP":  "C3",   # Pha + WGA    (w3)
+    "RNA":  "C4",   # SYTO 14      (w4)
+    "ER":   "C5",   # ConA         (w5)
+}
+
+# Whole-cell segmentation input channels (unified whole-cell instance masks).
+#   - cellpose4 / cellpose3 / microatlas / cellsam: 2 markers = cytoplasm + nucleus
+#   - microsam:                            single cytoplasm marker
+# AGP (Actin/Golgi/plasma membrane) is the best whole-cell boundary marker.
+SEG_CYTO_CHANNEL = "AGP"      # cytoplasm / membrane boundary marker
+SEG_NUCLEUS_CHANNEL = "DNA"   # nucleus marker (paired with cyto for cellpose family)
+
+# Channels used for Haralick texture features (nucleus + one bright organelle).
+TEXTURE_CHANNELS = ["DNA", "RNA"]
 
 # Image properties
 IMAGE_DTYPE = "uint16"
 IMAGE_BIT_DEPTH = 16
 
 # =========================================================================
-# BBBC021 Dataset dimensions
+# Dataset dimensions
 # =========================================================================
 
-N_COMPOUNDS = 113
-N_CONCENTRATIONS = 8
-N_FIELDS_TOTAL = 13200
-N_FILES_TOTAL = 39600  # 13200 fields x 3 channels
-N_MOA_CLASSES = 13
-N_MOA_COMPOUNDS = 38  # compounds with MoA annotation
+N_COMPOUNDS = 231         # perturbagens (excluding DMSO)
+N_CONCENTRATIONS = 1      # single concentration (10 uM)
+N_MOA_CLASSES = 10        # mechanism-of-action classes (balanced, excl. DMSO)
+N_REPLICATE_WELLS = 6     # compound-level replicates across the 18 plates
+N_SITES_PER_WELL = 5      # FL fields of view per well (sites s2,s4,s5,s6,s8)
+DEFAULT_CONCENTRATION = 10.0  # uM
 
-# MoA classes (13 known mechanisms, from BBBC021_v1_moa.csv)
-MOA_CLASSES = [
-    "Actin disruptors",
-    "Aurora kinase inhibitors",
-    "Cholesterol-lowering",
-    "DNA damage",
-    "DNA replication",
-    "DMSO",
-    "Eg5 inhibitors",
-    "Epithelial",
-    "Kinase inhibitors",
-    "Microtubule destabilizers",
-    "Microtubule stabilizers",
-    "Protein degradation",
-    "Protein synthesis",
-]
+# FL site identifiers used in fl_data.csv (BF sites 1..5 map to these).
+FL_SITES = [2, 4, 5, 6, 8]
+
+# Canonical MoA labels exactly as they appear in fl_data.csv "moa" column,
+# with the compound counts reported in the dataset README.
+MOA_CLASSES = {
+    "ATPase inhibitor":                 18,
+    "aurora kinase inhibitor":          20,
+    "HDAC inhibitor":                   33,
+    "HSP inhibitor":                    24,
+    "JAK inhibitor":                    21,
+    "PARP inhibitor":                   21,
+    "protein synthesis inhibitor":      23,
+    "retinoid receptor agonist":        19,
+    "topoisomerase inhibitor":          32,
+    "tubulin polymerization inhibitor": 20,
+}
+# The negative-control label in fl_data.csv (excluded from MoA clustering, used
+# only as the per-plate normalization baseline).
+DMSO_MOA_LABEL = "dmso"
 
 # =========================================================================
-# Download URLs
+# figshare download configuration
 # =========================================================================
 
-BBBC_BASE_URL = "https://data.broadinstitute.org/bbbc/BBBC021"
+FIGSHARE_ARTICLE_ID = 21378906
+FIGSHARE_DOI = "10.17044/scilifelab.21378906"
 
-METADATA_URLS = {
-    "image_csv": f"{BBBC_BASE_URL}/BBBC021_v1_image.csv",
-    "compound_csv": f"{BBBC_BASE_URL}/BBBC021_v1_compound.csv",
-    "moa_csv": f"{BBBC_BASE_URL}/BBBC021_v1_moa.csv",
+# Small metadata / benchmark archives (downloaded and extracted once).
+SMALL_FILES = {
+    "README.txt":         "https://ndownloader.figshare.com/files/39373556",
+    "data_tables.tar.gz": "https://ndownloader.figshare.com/files/37984380",
+    "CP_features.tar.gz": "https://ndownloader.figshare.com/files/37984449",
+    "grit_scores.tar.gz": "https://ndownloader.figshare.com/files/37985649",
 }
 
-# Plate zip URLs (55 archives, ~800 MB each)
-PLATE_ZIP_NAMES = [
-    "Week1_22123", "Week1_22141", "Week1_22161", "Week1_22361",
-    "Week1_22381", "Week1_22401",
-    "Week2_24121", "Week2_24141", "Week2_24161", "Week2_24361",
-    "Week2_24381", "Week2_24401",
-    "Week3_25421", "Week3_25441", "Week3_25461", "Week3_25681",
-    "Week3_25701", "Week3_25721",
-    "Week4_27481", "Week4_27521", "Week4_27542", "Week4_27801",
-    "Week4_27821", "Week4_27861",
-    "Week5_28901", "Week5_28921", "Week5_28961", "Week5_29301",
-    "Week5_29321", "Week5_29341",
-    "Week6_31641", "Week6_31661", "Week6_31681", "Week6_32061",
-    "Week6_32121", "Week6_32161",
-    "Week7_34341", "Week7_34381", "Week7_34641", "Week7_34661",
-    "Week7_34681",
-    "Week8_38203", "Week8_38221", "Week8_38241", "Week8_38341",
-    "Week8_38342",
-    "Week9_39206", "Week9_39221", "Week9_39222", "Week9_39282",
-    "Week9_39283", "Week9_39301",
-    "Week10_40111", "Week10_40115", "Week10_40119",
-]
+# Per-plate raw-image archives: plate -> (download_url, approx_size_GB).
+# Ordered small -> large so pilot runs and low-disk pipelines start cheap.
+PLATE_TARBALLS = {
+    "P015080": ("https://ndownloader.figshare.com/files/37986315",  4.608),
+    "P015081": ("https://ndownloader.figshare.com/files/37984389",  4.633),
+    "P015082": ("https://ndownloader.figshare.com/files/37986063",  5.724),
+    "P015083": ("https://ndownloader.figshare.com/files/37984458",  5.740),
+    "P015076": ("https://ndownloader.figshare.com/files/37988091",  7.832),
+    "P015077": ("https://ndownloader.figshare.com/files/37983477",  8.521),
+    "P015092": ("https://ndownloader.figshare.com/files/37986075", 23.001),
+    "P015093": ("https://ndownloader.figshare.com/files/37987962", 23.214),
+    "P015096": ("https://ndownloader.figshare.com/files/37984503", 27.986),
+    "P015097": ("https://ndownloader.figshare.com/files/37987326", 28.091),
+    "P015094": ("https://ndownloader.figshare.com/files/37988391", 29.318),
+    "P015095": ("https://ndownloader.figshare.com/files/37983156", 29.775),
+    "P015084": ("https://ndownloader.figshare.com/files/37984977", 51.678),
+    "P015085": ("https://ndownloader.figshare.com/files/37987770", 51.772),
+    "P015090": ("https://ndownloader.figshare.com/files/37983639", 79.484),
+    "P015091": ("https://ndownloader.figshare.com/files/37987500", 80.187),
+    "P015098": ("https://ndownloader.figshare.com/files/37988268", 85.671),
+    "P015099": ("https://ndownloader.figshare.com/files/37985868", 86.447),
+}
 
-
-def plate_zip_url(zip_name):
-    return f"{BBBC_BASE_URL}/BBBC021_v1_images_{zip_name}.zip"
-
+PLATE_NAMES = list(PLATE_TARBALLS.keys())
+DEFAULT_PLATE = "P015080"  # smallest plate; sensible single-plate default
 
 # =========================================================================
 # Model definitions
@@ -165,7 +219,13 @@ MODEL_CONFIGS = {
         "pretrained_model": "./microatlas/microatlas",
     },
     "cellsam": {
-        "use_wsi": False, "low_contrast_enhancement": False, "gauge_cell_size": False,
+        # cellsam is fed an (H, W, 3) uint8 [AGP, DNA, 0] image (same cyto+nucleus
+        # signal as the other 4 models). segment.py:
+        #   1. Monkey-patches AnchorDETR's nested_tensor_from_tensor_list so a
+        #      bare 3D (C,H,W) tensor gets the missing batch dim (cellSAM
+        #      0.0.dev1 otherwise raises "ValueError: not supported").
+        #   2. Runs the bare cellsam_pipeline(img); cellSAM resizes internally
+        #      to its native grid and the mask is resized back to (H, W).
     },
 }
 
@@ -217,21 +277,25 @@ CORRELATION_THRESHOLD = 0.95
 # =========================================================================
 
 # MoA classification
-MOA_MIN_SAMPLES_PER_CLASS = 3  # for leave-one-compound-out CV
+MOA_MIN_SAMPLES_PER_CLASS = 2
 
 # Unsupervised clustering
 UMAP_N_COMPONENTS = 2
-UMAP_N_NEIGHBORS = 15  # smaller for ~100 compounds
+UMAP_N_NEIGHBORS = 15
 UMAP_MIN_DIST = 0.1
 UMAP_METRIC = "cosine"
-UMAP_SEED = 42  # UMAP random_state (may need tuning per environment)
+UMAP_SEED = 42
 
-# Field-level clustering UMAP (higher dim to preserve structure for treatment aggregation)
+# Field-level clustering UMAP (higher dim to preserve structure for aggregation)
 FIELD_UMAP_N_COMPONENTS = 5
 FIELD_UMAP_N_NEIGHBORS = 5
 
 HDBSCAN_MIN_CLUSTER_SIZE = 5
 HDBSCAN_MIN_SAMPLES = 3
+
+# Number of clusters for treatment-level Agglomerative clustering.
+# Defaults to the number of MoA classes (10); override via --n_clusters.
+DEFAULT_N_CLUSTERS = N_MOA_CLASSES
 
 # Feature attribution
 ATTRIBUTION_ALPHA = 0.05
@@ -243,7 +307,7 @@ ATTRIBUTION_TOP_K = 20
 
 def ensure_dirs():
     """Create all necessary output directories."""
-    for d in [DATA_ROOT, IMAGES_DIR, METADATA_DIR, RESULTS_DIR]:
+    for d in [DATA_ROOT, IMAGES_DIR, METADATA_DIR, ARCHIVE_DIR, RESULTS_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -255,11 +319,12 @@ def ensure_model_dirs(model_name):
 
 if __name__ == "__main__":
     ensure_dirs()
-    print("BBBC021 Biomarker Discovery Configuration:")
+    print("U2OS-Cell-Painting Biomarker Discovery Configuration:")
     print(f"  Project root:  {PROJECT_ROOT}")
     print(f"  Cellpose root: {CELLPOSE_ROOT}")
     print(f"  Data root:     {DATA_ROOT}")
+    print(f"  Channels:      {CHANNEL_NAMES} (nucleus={NUCLEUS_CHANNEL}, cyto={SEG_CYTO_CHANNEL})")
     print(f"  Compounds:     {N_COMPOUNDS}")
-    print(f"  MoA classes:   {N_MOA_CLASSES}")
-    print(f"  Total fields:  {N_FIELDS_TOTAL:,}")
-    print(f"  Plate zips:    {len(PLATE_ZIP_NAMES)}")
+    print(f"  MoA classes:   {N_MOA_CLASSES} (+ DMSO control)")
+    print(f"  Plates:        {len(PLATE_NAMES)} (default {DEFAULT_PLATE})")
+    print(f"  figshare:      {FIGSHARE_DOI}")

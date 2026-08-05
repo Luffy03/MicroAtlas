@@ -13,8 +13,8 @@ For each treatment (compound + concentration):
 No supervised classifiers used. Pure statistical testing.
 
 Usage:
-  python biomarker_discovery/biomarker/perturbation.py --models cellpose4
-  python biomarker_discovery/biomarker/perturbation.py --models all
+  python src/morphology_profiling/biomarker/perturbation.py --models cellpose4
+  python src/morphology_profiling/biomarker/perturbation.py --models all
 """
 
 import multiprocessing
@@ -334,9 +334,14 @@ def dose_response_analysis(field_df, alpha=0.05, n_workers=8):
             all_records.extend(recs)
 
     dose_df = pd.DataFrame(all_records)
-    n_monotonic = dose_df['monotonic'].sum()
     print(f"  Total tests: {len(dose_df)}")
-    print(f"  Monotonic (|r|>0.7, p<0.05): {n_monotonic}")
+    if len(dose_df) == 0 or 'monotonic' not in dose_df.columns:
+        n_monotonic = 0
+        print("  [SKIP] dose_response: no multi-concentration data "
+              "(need >=3 concentrations per compound; U2OS-Cell-Painting is single-concentration)")
+    else:
+        n_monotonic = dose_df['monotonic'].sum()
+        print(f"  Monotonic (|r|>0.7, p<0.05): {n_monotonic}")
 
     return dose_df
 
@@ -528,12 +533,18 @@ def save_results(treatment_stats, per_feature_stats, dose_response_df,
     top.to_csv(path4, index=False)
     print(f"  Saved: {path4}")
 
-    # Monotonic dose-response features
-    mono = dose_response_df[dose_response_df['monotonic']]
-    if len(mono) > 0:
-        path5 = output_dir / "monotonic_features.csv"
-        mono.to_csv(path5, index=False)
-        print(f"  Saved: {path5} ({len(mono)} monotonic features)")
+    # Monotonic dose-response features (skip if no multi-concentration data)
+    if 'monotonic' in dose_response_df.columns:
+        mono = dose_response_df[dose_response_df['monotonic']]
+        if len(mono) > 0:
+            path5 = output_dir / "monotonic_features.csv"
+            mono.to_csv(path5, index=False)
+            print(f"  Saved: {path5} ({len(mono)} monotonic features)")
+        else:
+            print("  [SKIP] monotonic_features.csv: 0 monotonic features")
+    else:
+        print("  [SKIP] monotonic_features.csv: dose_response produced no 'monotonic' column "
+              "(single-concentration dataset)")
 
     # MoA consistency validation
     if moa_validation:

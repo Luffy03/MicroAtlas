@@ -1,24 +1,29 @@
 """
 feature_extraction.py
 =====================
-Pure Python single-cell feature extraction for BBBC021 3-channel images.
+Pure Python single-cell feature extraction for U2OS-Cell-Painting N-channel images.
 
-Extracts ~106 features per cell across 3 channels (DAPI, Actin, Tubulin).
+Extracts per-cell features across all fluorescence channels defined in
+config.CHANNEL_NAMES (U2OS-Cell-Painting: DNA, Mito, AGP, RNA, ER).
 Optimized: regionprops called once, cell pixels pre-extracted, ndimage batched.
 
-  - AreaShape:  regionprops shape descriptors (13)
-  - Intensity:  batched ndimage stats + per-cell percentiles (12 x 3 + 2 = 38)
-  - Texture:    Haralick GLCM on DAPI+Actin, 1 scale (13 x 2 = 26)
-  - Granularity: multi-scale opening on DAPI, 5 scales (5)
-  - RadialDistribution: per-channel binned stats (4 x 3 = 12)
-  - Correlation: inter-channel Pearson/Mander's (12)
+  - AreaShape:  regionprops shape descriptors
+  - Intensity:  batched ndimage stats + per-cell percentiles, per channel
+  - Texture:    Haralick GLCM on config.TEXTURE_CHANNELS
+  - Granularity: multi-scale opening on the nucleus channel
+  - RadialDistribution: per-channel binned stats
+  - Correlation: inter-channel Pearson/Mander's (all channel pairs)
+
+Channel images for a field are derived from its field key
+("{well}_s{site}") as {channel}/{field_key}_w{idx}.tif, with idx following
+config.CHANNEL_NAMES order (nucleus = w1).
 
 No CellProfiler dependency. Only numpy/scipy/skimage/mahotas.
 
 Usage:
-  python biomarker_discovery/feature_extraction.py --plate Week1_22123
-  python biomarker_discovery/feature_extraction.py --all
-  python biomarker_discovery/feature_extraction.py --status
+  python src/morphology_profiling/feature_extraction.py --plate P015080
+  python src/morphology_profiling/feature_extraction.py --all
+  python src/morphology_profiling/feature_extraction.py --status
 """
 
 import argparse
@@ -194,8 +199,8 @@ def compute_texture_features(images, channel_names, props,
     if not props:
         return []
 
-    # Only use first 2 channels for texture
-    texture_channels = [ch for ch in channel_names if ch in ("DAPI", "Actin")]
+    # Texture channels are configurable (nucleus + a bright organelle channel)
+    texture_channels = [ch for ch in channel_names if ch in config.TEXTURE_CHANNELS]
     ch_indices = [channel_names.index(ch) for ch in texture_channels]
 
     records = []
@@ -247,9 +252,9 @@ def compute_texture_features(images, channel_names, props,
 # Granularity features (~10, DAPI only)
 # =========================================================================
 
-def compute_granularity_features(labels, dapi_image,
+def compute_granularity_features(labels, nucleus_image, nucleus_name="DNA",
                                   spectrum_length=5):
-    """Compute multi-scale granularity features on DAPI channel.
+    """Compute multi-scale granularity features on the nucleus channel.
 
     Uses grey_opening at 5 scales (3,5,7,9,11) to decompose texture.
     Reduced from 10 for speed — first 5 scales capture most information.
@@ -258,7 +263,7 @@ def compute_granularity_features(labels, dapi_image,
         return []
 
     label_ids = np.arange(1, labels.max() + 1)
-    img_f = dapi_image.astype(np.float64)
+    img_f = nucleus_image.astype(np.float64)
 
     # Compute opened images at each scale
     opened_images = []
@@ -285,7 +290,7 @@ def compute_granularity_features(labels, dapi_image,
     for j in range(n_obj):
         rec = {}
         for i in range(spectrum_length):
-            rec[f'Cell_Granularity_{i+1}_DAPI'] = float(gran_matrix[j, i])
+            rec[f'Cell_Granularity_{i+1}_{nucleus_name}'] = float(gran_matrix[j, i])
         records.append(rec)
 
     return records
@@ -422,18 +427,24 @@ def compute_correlation_features(images, channel_names, props, cell_pixels):
 # Multiprocessing worker (module-level for pickling)
 # =========================================================================
 
-def _worker_extract_field(args_tuple, plate_name, plate_img_dir, mask_dir):
-    """Worker for multiprocessing Pool. Extracts features for one field."""
-    dapi_name, actin_name, tubulin_name, field_key = args_tuple
+def _field_channel_paths(plate_img_dir, field_key):
+    """Return channel image paths for a field, in config.CHANNEL_NAMES order.
 
-    dapi_path = Path(plate_img_dir) / "DAPI" / dapi_name
-    actin_path = Path(plate_img_dir) / "Actin" / actin_name
-    tubulin_path = Path(plate_img_dir) / "Tubulin" / tubulin_name
+    Channel files follow the normalized naming {channel}/{field_key}_w{idx}.tif
+    where idx = 1..N follows config.CHANNEL_NAMES order (nucleus = w1).
+    """
+    plate_img_dir = Path(plate_img_dir)
+    return [plate_img_dir / ch / f"{field_key}_w{idx}.tif"
+            for idx, ch in enumerate(config.CHANNEL_NAMES, start=1)]
+
+
+def _worker_extract_field(field_key, plate_name, plate_img_dir, mask_dir):
+    """Worker for multiprocessing Pool. Extracts features for one field."""
+    channel_paths = _field_channel_paths(plate_img_dir, field_key)
     mask_path = Path(mask_dir) / f"{field_key}_mask.tif"
 
     try:
-        df = extract_features_for_field(dapi_path, actin_path,
-                                        tubulin_path, mask_path)
+        df = extract_features_for_field(channel_paths, mask_path)
         if len(df) > 0:
             df['plate'] = plate_name
             df['field'] = field_key
@@ -446,41 +457,43 @@ def _worker_extract_field(args_tuple, plate_name, plate_img_dir, mask_dir):
 # Main extraction entry point
 # =========================================================================
 
-def extract_features_for_field(dapi_path, actin_path, tubulin_path, mask_path):
+def extract_features_for_field(channel_paths, mask_path):
     """Extract all features for a single field of view.
 
     Optimized: regionprops called once, cell pixels pre-extracted once,
     ndimage stats batched. All shared across feature functions.
 
     Args:
-        dapi_path: path to DAPI channel TIFF
-        actin_path: path to Actin channel TIFF
-        tubulin_path: path to Tubulin channel TIFF
+        channel_paths: list of channel image TIFF paths, in
+                       config.CHANNEL_NAMES order (nucleus channel first)
         mask_path: path to instance mask TIFF (uint32)
 
     Returns:
         pandas DataFrame (one row per cell), or empty DataFrame
     """
-    # Load images
-    dapi = imread(str(dapi_path)).astype(np.float64)
-    actin = imread(str(actin_path)).astype(np.float64)
-    tubulin = imread(str(tubulin_path)).astype(np.float64)
+    # Load channel images (in config.CHANNEL_NAMES order)
+    images = []
+    for p in channel_paths:
+        img = imread(str(p)).astype(np.float64)
+        if img.ndim > 2:
+            img = img[..., 0]
+        images.append(img)
     labels = imread(str(mask_path)).astype(np.uint32)
 
     if labels.max() == 0:
         return pd.DataFrame()
 
-    images = [dapi, actin, tubulin]
     channel_names = config.CHANNEL_NAMES
+    nucleus_idx = channel_names.index(config.NUCLEUS_CHANNEL)
 
-    # === Compute regionprops ONCE (eliminates 5 redundant calls) ===
+    # === Compute regionprops ONCE (eliminates redundant calls) ===
     props = regionprops(labels)
     if not props:
         return pd.DataFrame()
 
     label_ids = np.arange(1, labels.max() + 1)
 
-    # === Pre-extract cell pixel arrays ONCE (eliminates ~1800 array slices) ===
+    # === Pre-extract cell pixel arrays ONCE ===
     cell_pixels = []  # cell_pixels[cell_idx][ch_idx] = 1D float64 array
     for prop in props:
         ch_pixels = []
@@ -493,7 +506,8 @@ def extract_features_for_field(dapi_path, actin_path, tubulin_path, mask_path):
     intensity = compute_intensity_features(labels, images, channel_names,
                                             props, cell_pixels, label_ids)
     texture = compute_texture_features(images, channel_names, props)
-    granularity = compute_granularity_features(labels, dapi)
+    granularity = compute_granularity_features(
+        labels, images[nucleus_idx], config.NUCLEUS_CHANNEL)
     radial = compute_radial_features(images, channel_names, props, cell_pixels)
     correlation = compute_correlation_features(images, channel_names,
                                                 props, cell_pixels)
@@ -514,47 +528,180 @@ def extract_features_for_field(dapi_path, actin_path, tubulin_path, mask_path):
 
 
 def _get_field_key(filename):
-    """Extract field key from BBBC021 filename.
+    """Extract field key from a normalized channel filename.
 
-    E.g. G10_s1_w1BEDC2073-...tif -> G10_s1
+    E.g. A01_s1_w1.tif -> A01_s1
     """
     import re
     m = re.match(r'^(.+?)_w\d+', filename)
     return m.group(1) if m else Path(filename).stem
 
 
-def _build_channel_file_map(plate_name):
-    """Build DAPI filename -> (Actin filename, Tubulin filename) from image CSV."""
-    if not config.IMAGE_CSV.exists():
-        return {}
+# =========================================================================
+# Field-level checkpoint helpers (resume interrupted plate extraction)
+# =========================================================================
 
-    df = pd.read_csv(config.IMAGE_CSV)
-    plate_col = "Image_Metadata_Plate_DAPI"
-    if plate_col in df.columns:
-        df = df[df[plate_col] == plate_name]
+def _checkpoint_dir(model_name, plate_name):
+    """Per-plate checkpoint directory holding one file per completed field."""
+    return config.features_dir(model_name) / "_checkpoint" / plate_name
 
-    mapping = {}
-    for _, row in df.iterrows():
-        dapi = row.get("Image_FileName_DAPI", "")
-        actin = row.get("Image_FileName_Actin", "")
-        tubulin = row.get("Image_FileName_Tubulin", "")
-        if dapi and actin and tubulin:
-            mapping[dapi] = (actin, tubulin)
-    return mapping
+
+def _field_done(ckpt_dir, field_key):
+    """A field is done if it has a result CSV or an empty-field marker."""
+    return (ckpt_dir / f"{field_key}.csv").exists() or \
+        (ckpt_dir / f"{field_key}.empty").exists()
+
+
+def _write_field_checkpoint(ckpt_dir, field_key, df):
+    """Persist one field's result so it is not recomputed on resume.
+
+    Non-empty fields are written atomically to {field_key}.csv; fields with
+    no cells get a zero-byte {field_key}.empty marker.
+    """
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    if df is not None and len(df) > 0:
+        final = ckpt_dir / f"{field_key}.csv"
+        tmp = ckpt_dir / f"{field_key}.csv.tmp"
+        df.to_csv(tmp, index=False)
+        tmp.replace(final)  # atomic rename -> no half-written CSV on crash
+    else:
+        (ckpt_dir / f"{field_key}.empty").touch()
+
+
+def _load_checkpoint(ckpt_dir, field_keys=None):
+    """Concatenate completed field CSVs from the checkpoint directory.
+
+    If field_keys is given, only those fields' CSVs are read (used to load
+    just the resumed-from-disk fields, avoiding re-reading files this run
+    already holds in memory). Otherwise every *.csv in the dir is read.
+    """
+    if not ckpt_dir.exists():
+        return pd.DataFrame()
+    if field_keys is not None:
+        files = [ckpt_dir / f"{k}.csv" for k in field_keys]
+    else:
+        files = sorted(ckpt_dir.glob("*.csv"))
+    dfs = []
+    for f in files:
+        if not f.exists():
+            continue
+        try:
+            dfs.append(pd.read_csv(f))
+        except Exception:
+            continue
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+
+def _clear_checkpoint(ckpt_dir):
+    """Remove a plate's checkpoint directory after the final CSV is saved."""
+    if not ckpt_dir.exists():
+        return
+    for f in ckpt_dir.glob("*"):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    try:
+        ckpt_dir.rmdir()
+    except OSError:
+        pass
+
+
+def _expected_plate_fields(plate_name):
+    """Field keys a plate should have, per the authoritative image table.
+
+    Returns None when the table is unavailable so callers fall back to the
+    persisted masks.
+    """
+    table_path = config.RESULTS_DIR / "preprocess" / "image_table.csv"
+    if not table_path.exists():
+        return None
+    try:
+        df = pd.read_csv(table_path, usecols=["plate", "field"])
+    except Exception:
+        return None
+    return set(df.loc[df["plate"] == plate_name, "field"].astype(str))
+
+
+def plate_features_complete(plate_name, model_name):
+    """Check whether a saved feature CSV covers every field of its plate.
+
+    Images are deleted per plate, so at check time only the masks and the
+    image table survive. A plate whose images were partially removed before
+    extraction yields a CSV covering a handful of fields; comparing field
+    coverage against the mask count catches that, whereas testing for file
+    existence does not.
+
+    Returns:
+        (complete, n_fields_in_csv, n_fields_expected)
+    """
+    path = config.features_dir(model_name) / f"features_{plate_name}.csv"
+    expected = _expected_plate_fields(plate_name)
+    if expected:
+        n_expected = len(expected)
+    else:
+        mask_dir = config.masks_dir(model_name) / plate_name
+        n_expected = len(list(mask_dir.glob("*_mask.tif"))) \
+            if mask_dir.exists() else 0
+    if not path.exists():
+        return False, 0, n_expected
+    try:
+        got = pd.read_csv(path, usecols=["field"])["field"].astype(str).nunique()
+    except Exception:
+        return False, 0, n_expected
+    return got >= n_expected, got, n_expected
+
+
+def verify_completeness(models):
+    """Audit every saved feature CSV against the fields it should cover.
+
+    Returns the number of incomplete plates (0 == clean).
+    """
+    print("\n=== Feature Completeness Audit ===")
+    n_bad = 0
+    n_csvs = 0
+    for model_name in models:
+        feat_dir = config.features_dir(model_name)
+        csvs = sorted(feat_dir.glob("features_*.csv")) if feat_dir.exists() else []
+        if not csvs:
+            continue
+        n_csvs += len(csvs)
+        print(f"\n  {model_name}:")
+        for f in csvs:
+            plate = f.stem.replace("features_", "")
+            complete, got, expect = plate_features_complete(plate, model_name)
+            if not complete:
+                n_bad += 1
+            print(f"    {plate}: {got}/{expect} fields "
+                  f"[{'OK' if complete else 'INCOMPLETE'}]")
+    if not n_csvs:
+        print("\n  No feature CSVs found; nothing to audit.")
+    elif n_bad:
+        print(f"\n  {n_bad}/{n_csvs} plate(s) INCOMPLETE. Re-download those "
+              f"plates (download.py --plate P) and re-extract with --force.")
+    else:
+        print(f"\n  All {n_csvs} plate(s) complete.")
+    return n_bad
 
 
 def extract_plate_features(plate_name, model_name="cellpose4",
-                           image_df=None, n_workers=8):
+                           image_df=None, n_workers=8, force=False):
     """Extract features for all fields in a plate.
 
-    Uses image CSV to correctly map DAPI files to Actin/Tubulin files,
-    since each channel has a different UUID in the filename.
+    Fields are enumerated from the nucleus-channel directory using the
+    normalized naming scheme {channel}/{well}_s{site}_w{idx}.tif. A field
+    is kept only if all N channels and its mask exist.
+
+    Field-level resume: each completed field is written to a per-plate
+    checkpoint directory; an interrupted run continues from the fields that
+    have not been processed yet. Pass force=True to recompute all fields.
 
     Args:
         plate_name: plate identifier
         model_name: segmentation model name (for mask path)
-        image_df: optional preprocessed image table
+        image_df: optional preprocessed image table (unused, kept for API)
         n_workers: number of parallel workers (default 8)
+        force: ignore and clear any existing checkpoint, recompute all fields
 
     Returns:
         DataFrame with all cell features for the plate
@@ -563,6 +710,9 @@ def extract_plate_features(plate_name, model_name="cellpose4",
 
     plate_img_dir = config.IMAGES_DIR / plate_name
     mask_dir = config.masks_dir(model_name) / plate_name
+    ckpt_dir = _checkpoint_dir(model_name, plate_name)
+    if force:
+        _clear_checkpoint(ckpt_dir)
 
     if not plate_img_dir.exists():
         print(f"  [ERROR] Image directory not found: {plate_img_dir}")
@@ -571,53 +721,75 @@ def extract_plate_features(plate_name, model_name="cellpose4",
         print(f"  [ERROR] Mask directory not found: {mask_dir}")
         return pd.DataFrame()
 
-    # Build DAPI -> (Actin, Tubulin) file mapping from image CSV
-    channel_map = _build_channel_file_map(plate_name)
-    print(f"  Channel mapping: {len(channel_map)} fields from image CSV")
-
-    # Find all DAPI files
-    dapi_dir = plate_img_dir / "DAPI"
-    if not dapi_dir.exists():
-        print(f"  [ERROR] DAPI directory not found: {dapi_dir}")
+    # Enumerate fields from the nucleus-channel directory
+    nucleus_dir = plate_img_dir / config.NUCLEUS_CHANNEL
+    if not nucleus_dir.exists():
+        print(f"  [ERROR] Nucleus channel dir not found: {nucleus_dir}")
         return pd.DataFrame()
 
-    dapi_files = sorted(dapi_dir.glob("*.tif"))
-    print(f"  Plate {plate_name}: {len(dapi_files)} fields (from DAPI enumeration)")
+    nucleus_files = sorted(nucleus_dir.glob("*.tif"))
+    print(f"  Plate {plate_name}: {len(nucleus_files)} fields "
+          f"(from {config.NUCLEUS_CHANNEL} enumeration)")
 
-    # Build task list: (dapi_name, actin_name, tubulin_name, field_key)
+    # The enumeration above trusts the disk; the image table is authoritative.
+    # A plate whose images were partially deleted looks perfectly normal here,
+    # so report the shortfall instead of silently featurizing the remainder.
+    expected_fields = _expected_plate_fields(plate_name)
+    if expected_fields:
+        found = {_get_field_key(p.name) for p in nucleus_files}
+        n_absent = len(expected_fields - found)
+        if n_absent:
+            print(f"  [ERROR] {plate_name}: {n_absent}/{len(expected_fields)} "
+                  f"fields have no {config.NUCLEUS_CHANNEL} image on disk. "
+                  f"The plate images are incomplete (deleted or never "
+                  f"extracted); run download.py --plate {plate_name} first, "
+                  f"otherwise this plate's features will be truncated.")
+
+    # Build task list of field keys; keep only fields with all channels + mask
     tasks = []
     skipped = 0
-    for dapi_path in dapi_files:
-        dapi_name = dapi_path.name
-        field_key = _get_field_key(dapi_name)
-
-        if dapi_name not in channel_map:
-            skipped += 1
-            continue
-
-        actin_name, tubulin_name = channel_map[dapi_name]
-        actin_path = plate_img_dir / "Actin" / actin_name
-        tubulin_path = plate_img_dir / "Tubulin" / tubulin_name
+    resumed = 0
+    prior_csv_fields = []  # resumed non-empty fields to re-read from disk
+    for nuc_path in nucleus_files:
+        field_key = _get_field_key(nuc_path.name)
+        channel_paths = _field_channel_paths(plate_img_dir, field_key)
         mask_path = mask_dir / f"{field_key}_mask.tif"
 
-        if not actin_path.exists() or not tubulin_path.exists():
+        if not all(p.exists() for p in channel_paths):
             skipped += 1
             continue
         if not mask_path.exists():
             skipped += 1
             continue
 
-        tasks.append((dapi_name, actin_name, tubulin_name, field_key))
+        # Field-level resume: skip fields already checkpointed
+        if _field_done(ckpt_dir, field_key):
+            resumed += 1
+            if (ckpt_dir / f"{field_key}.csv").exists():
+                prior_csv_fields.append(field_key)
+            continue
+
+        tasks.append(field_key)
 
     if skipped > 0:
-        print(f"  Skipped {skipped} fields (missing files)")
+        print(f"  Skipped {skipped} fields (missing channels or mask)")
+    if resumed > 0:
+        print(f"  Resuming: {resumed} fields already done "
+              f"(checkpoint), {len(tasks)} remaining")
     if not tasks:
+        if resumed > 0:
+            # All valid fields already checkpointed -> assemble final result
+            result = _load_checkpoint(ckpt_dir, prior_csv_fields)
+            if len(result) > 0:
+                print(f"  Total: {len(result):,} cells, "
+                      f"{len(result.columns)} features (from checkpoint)")
+            return result
         print(f"  No valid tasks.")
         return pd.DataFrame()
 
     # Parallel extraction
     t_start = time.time()
-    all_dfs = []
+    new_dfs = []  # this run's freshly computed fields (kept in memory)
     n_errors = 0
 
     if n_workers > 1 and len(tasks) > 1:
@@ -629,46 +801,51 @@ def extract_plate_features(plate_name, model_name="cellpose4",
             mask_dir=str(mask_dir),
         )
         with multiprocessing.Pool(processes=n_workers) as pool:
-            results = list(tqdm(
+            for df, field_key, err in tqdm(
                 pool.imap_unordered(worker_fn, tasks),
                 total=len(tasks),
                 desc=f"  {plate_name}",
                 unit="field",
-            ))
-
-        for df, field_key, err in results:
-            if err is not None:
-                n_errors += 1
-                continue
-            if len(df) > 0:
-                all_dfs.append(df)
+            ):
+                if err is not None:
+                    n_errors += 1
+                    continue
+                # Persist each completed field immediately (crash-safe resume)
+                _write_field_checkpoint(ckpt_dir, field_key, df)
+                if len(df) > 0:
+                    new_dfs.append(df)
     else:
         # --- Single-process path ---
-        for task in tqdm(tasks, desc=f"  {plate_name}", unit="field"):
-            dapi_name, actin_name, tubulin_name, field_key = task
-            dapi_path = dapi_dir / dapi_name
-            actin_path = plate_img_dir / "Actin" / actin_name
-            tubulin_path = plate_img_dir / "Tubulin" / tubulin_name
+        for field_key in tqdm(tasks, desc=f"  {plate_name}", unit="field"):
+            channel_paths = _field_channel_paths(plate_img_dir, field_key)
             mask_path = mask_dir / f"{field_key}_mask.tif"
 
             try:
-                df = extract_features_for_field(
-                    dapi_path, actin_path, tubulin_path, mask_path)
+                df = extract_features_for_field(channel_paths, mask_path)
                 if len(df) > 0:
                     df['plate'] = plate_name
                     df['field'] = field_key
-                    all_dfs.append(df)
+                _write_field_checkpoint(ckpt_dir, field_key, df)
+                if len(df) > 0:
+                    new_dfs.append(df)
             except Exception as e:
                 n_errors += 1
 
     elapsed = time.time() - t_start
-    n_done = len(all_dfs)
-    rate = n_done / elapsed if elapsed > 0 else 0
-    print(f"  {n_done} fields in {elapsed:.1f}s ({rate:.1f} fields/s), "
+    n_new = len(new_dfs)
+    rate = n_new / elapsed if elapsed > 0 else 0
+    print(f"  {n_new} new fields in {elapsed:.1f}s ({rate:.1f} fields/s), "
           f"{n_errors} errors")
 
-    if all_dfs:
-        result = pd.concat(all_dfs, ignore_index=True)
+    # Assemble the full plate: freshly computed (in memory) + resumed (on disk).
+    # Only resumed fields are re-read, so a fresh run does no extra CSV parsing.
+    parts = list(new_dfs)
+    if prior_csv_fields:
+        prior_df = _load_checkpoint(ckpt_dir, prior_csv_fields)
+        if len(prior_df) > 0:
+            parts.append(prior_df)
+    if parts:
+        result = pd.concat(parts, ignore_index=True)
         print(f"  Total: {len(result):,} cells, {len(result.columns)} features")
         return result
     else:
@@ -708,7 +885,7 @@ def list_status():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract per-cell features from BBBC021 images"
+        description="Extract per-cell features from U2OS-Cell-Painting images"
     )
     parser.add_argument("--models", type=str, nargs="+", default=None,
                         help="Models (e.g. cellpose4 cellpose3). "
@@ -723,6 +900,9 @@ def main():
                         help="Re-extract even if features file exists")
     parser.add_argument("--status", action="store_true",
                         help="Show extraction status")
+    parser.add_argument("--verify", action="store_true",
+                        help="Audit field coverage of every saved feature CSV "
+                             "and exit non-zero if any plate is truncated")
     parser.add_argument("--workers", type=int, default=8,
                         help="Number of parallel workers (default: 8)")
     args = parser.parse_args()
@@ -740,6 +920,9 @@ def main():
         models_to_run = config.MODELS
     else:
         models_to_run = args.models
+
+    if args.verify:
+        sys.exit(1 if verify_completeness(models_to_run) else 0)
 
     for model_name in models_to_run:
         print(f"\n{'='*60}")
@@ -764,14 +947,24 @@ def main():
         for plate in plates:
             output_path = feat_dir / f"features_{plate}.csv"
             if output_path.exists() and not args.force:
-                print(f"  [SKIP] {plate}: features already exist")
+                complete, got, expect = plate_features_complete(plate, model_name)
+                if complete:
+                    print(f"  [SKIP] {plate}: features already exist")
+                else:
+                    print(f"  [INCOMPLETE] {plate}: features cover only "
+                          f"{got}/{expect} fields. Re-download the plate "
+                          f"images, then re-run with --force. Existing CSV "
+                          f"left untouched.")
                 continue
 
             print(f"\nExtracting features for plate: {plate} [{model_name}]")
             df = extract_plate_features(plate, model_name=model_name,
-                                        n_workers=args.workers)
+                                        n_workers=args.workers,
+                                        force=args.force)
             if len(df) > 0:
                 save_plate_features(df, plate, model_name=model_name)
+                # Final CSV written -> drop the per-field checkpoint
+                _clear_checkpoint(_checkpoint_dir(model_name, plate))
 
 
 if __name__ == "__main__":

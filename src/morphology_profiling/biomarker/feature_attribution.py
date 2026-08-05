@@ -16,8 +16,8 @@ For each MoA class vs DMSO:
 No supervised classifiers or SHAP. Pure statistical testing.
 
 Usage:
-  python biomarker_discovery/biomarker/feature_attribution.py --models cellpose4
-  python biomarker_discovery/biomarker/feature_attribution.py --models all
+  python src/morphology_profiling/biomarker/feature_attribution.py --models cellpose4
+  python src/morphology_profiling/biomarker/feature_attribution.py --models all
 """
 
 import multiprocessing

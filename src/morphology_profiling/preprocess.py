@@ -1,25 +1,31 @@
 """
 preprocess.py
 =============
-Parse BBBC021 metadata and build treatment-level mapping tables.
+Build the field/treatment-level mapping tables for the U2OS-Cell-Painting dataset.
 
-Responsibilities:
-  - Parse BBBC021_v1_image.csv (image paths, plate/well/compound/concentration)
-  - Parse BBBC021_v1_moa.csv (compound + concentration -> MoA class)
-  - Parse BBBC021_v1_compound.csv (compound -> SMILES)
-  - Identify DMSO control wells
-  - Build unified treatment table with MoA labels
-  - Print dataset statistics
+Instead of joining a platemap TSV with a compound-metadata TSV, the
+U2OS-Cell-Painting dataset ships a single authoritative table, fl_data.csv, that already gives
+plate / well / site / compound / MoA and the per-channel TIFF filenames. So this
+stage simply:
+  - enumerates the nucleus (DNA) images actually on disk to find which
+    (plate, well, site) fields have been downloaded + extracted,
+  - joins them with fl_data.csv to attach compound + MoA,
+  - marks DMSO negative-control fields (moa == "dmso"),
+  - emits the same image_table.csv schema the downstream pipeline expects.
+
+Because every compound is imaged at a single concentration (10 uM), the
+treatment level is equivalent to the compound level.
 
 Usage:
-  python biomarker_discovery/preprocess.py
-  python biomarker_discovery/preprocess.py --stats
+  python src/morphology_profiling/preprocess.py
+  python src/morphology_profiling/preprocess.py --plates P015080 P015081
+  python src/morphology_profiling/preprocess.py --stats
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
-from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -28,277 +34,264 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-def load_image_metadata():
-    """Load BBBC021_v1_image.csv.
+# =========================================================================
+# Metadata loading
+# =========================================================================
 
-    Columns: TableNumber, ImageNumber,
-             Image_FileName_DAPI, Image_PathName_DAPI,
-             Image_FileName_Tubulin, Image_PathName_Tubulin,
-             Image_FileName_Actin, Image_PathName_Actin,
-             Image_Metadata_Plate_DAPI, Image_Metadata_Well_DAPI,
-             Replicate, Image_Metadata_Compound,
-             Image_Metadata_Concentration
-    """
-    if not config.IMAGE_CSV.exists():
+def load_fl_table():
+    """Load fl_data.csv (plate, well, site, bf_site, compound, C1..C5, moa)."""
+    if not config.FL_DATA_CSV.exists():
         raise FileNotFoundError(
-            f"Image metadata not found: {config.IMAGE_CSV}\n"
+            f"fl_data.csv not found: {config.FL_DATA_CSV}\n"
             f"Run: python download.py --metadata_only"
         )
-    df = pd.read_csv(config.IMAGE_CSV)
-    print(f"Loaded image metadata: {len(df):,} rows")
+    df = pd.read_csv(config.FL_DATA_CSV, dtype=str)
+    # Normalize the join keys.
+    df["plate"] = df["plate"].str.strip()
+    df["well"] = df["well"].str.strip()
+    df["site_i"] = df["site"].str.lstrip("s").astype(int)
+    df["moa"] = df["moa"].fillna("").str.strip()
+    df["compound"] = df["compound"].fillna("").str.strip()
+    print(f"Loaded fl_data.csv: {len(df)} FL fields, "
+          f"{df['compound'].nunique()} compounds, {df['moa'].nunique()} MoA labels")
     return df
 
 
-def load_moa_labels():
-    """Load BBBC021_v1_moa.csv.
+# =========================================================================
+# Field enumeration
+# =========================================================================
 
-    Columns: compound, concentration, moa
+_FIELD_RE = re.compile(r"^([A-P]\d{2})_s(\d+)_w\d+", re.IGNORECASE)
+
+
+def build_fields_from_table(fl_df, plates=None):
+    """Enumerate every FL field listed in fl_data.csv (disk-independent).
+
+    This is the default: fl_data.csv is authoritative, so the full label table
+    persists even after a plate's images are deleted in the disk-frugal loop
+    (download -> segment -> featurize -> delete images). segment.py and
+    feature_extraction.py enumerate work from whatever images are on disk, so
+    image_table.csv is only needed to attach MoA labels during aggregation.
+
+    Returns a DataFrame with columns: plate, well, site, field.
     """
-    if not config.MOA_CSV.exists():
+    df = fl_df[["plate", "well", "site_i"]].rename(columns={"site_i": "site"}).copy()
+    if plates is not None:
+        df = df[df["plate"].isin(set(plates))]
+    df = df.drop_duplicates(["plate", "well", "site"]).reset_index(drop=True)
+    df["field"] = df["well"] + "_s" + df["site"].astype(str)
+    n_plates = df["plate"].nunique() if len(df) else 0
+    print(f"Enumerated {len(df)} FL fields across {n_plates} plate(s) from fl_data.csv")
+    return df
+
+
+def discover_fields(plates=None):
+    """Enumerate downloaded nucleus images to list available (plate, well, site).
+
+    Returns a DataFrame with columns: plate, well, site, field.
+    field == "{well}_s{site}" (the shared field key used across the pipeline).
+    """
+    if not config.IMAGES_DIR.exists():
         raise FileNotFoundError(
-            f"MoA labels not found: {config.MOA_CSV}\n"
-            f"Run: python download.py --metadata_only"
+            f"No images directory: {config.IMAGES_DIR}\nRun download.py first."
         )
-    df = pd.read_csv(config.MOA_CSV)
-    print(f"Loaded MoA labels: {len(df)} compound-concentrations, "
-          f"{df['moa'].nunique()} classes")
+
+    if plates is None:
+        plates = [d.name for d in sorted(config.IMAGES_DIR.iterdir()) if d.is_dir()]
+
+    records = []
+    for plate in plates:
+        nuc_dir = config.IMAGES_DIR / plate / config.NUCLEUS_CHANNEL
+        if not nuc_dir.exists():
+            print(f"  [WARN] No {config.NUCLEUS_CHANNEL} dir for plate {plate}")
+            continue
+        for f in sorted(nuc_dir.glob("*.tif")):
+            m = _FIELD_RE.match(f.name)
+            if not m:
+                continue
+            well, site = m.group(1).upper(), int(m.group(2))
+            records.append({
+                "plate": plate,
+                "well": well,
+                "site": site,
+                "field": f"{well}_s{site}",
+            })
+
+    df = pd.DataFrame(records)
+    n_plates = df["plate"].nunique() if len(df) else 0
+    print(f"Discovered {len(df)} fields across {n_plates} plate(s)")
     return df
 
 
-def load_compound_smiles():
-    """Load BBBC021_v1_compound.csv.
+# =========================================================================
+# Unified table
+# =========================================================================
 
-    Columns: compound, smiles
-    """
-    if not config.COMPOUND_CSV.exists():
-        return pd.DataFrame(columns=["compound", "smiles"])
-    df = pd.read_csv(config.COMPOUND_CSV)
-    print(f"Loaded compound SMILES: {len(df)} compounds")
-    return df
-
-
-def build_unified_table(image_df, moa_df, compound_df):
-    """Build unified treatment table joining images with MoA labels.
+def build_unified_table(fields_df, fl_df):
+    """Join discovered fields with fl_data.csv to attach compound + MoA.
 
     Returns DataFrame with columns:
-      ImageNumber, plate, well, compound, concentration,
-      moa, smiles, replicate,
-      path_DAPI, path_Actin, path_Tubulin
+      plate, well, site, field, broad_sample, compound, concentration,
+      moa, pert_iname, smiles, is_dmso, path_<CHANNEL> ...
     """
-    df = image_df.copy()
+    if fields_df.empty:
+        return fields_df
 
-    # Standardize column names
-    col_map = {
-        "Image_Metadata_Plate_DAPI": "plate",
-        "Image_Metadata_Well_DAPI": "well",
-        "Image_Metadata_Compound": "compound",
-        "Image_Metadata_Concentration": "concentration",
-        "Replicate": "replicate",
-    }
-    df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
-
-    # Normalize compound names for joining
-    df["compound_clean"] = df["compound"].astype(str).str.strip().str.lower()
-
-    # Normalize concentration for joining (MoA CSV uses numeric concentrations)
-    df["concentration_num"] = pd.to_numeric(df["concentration"], errors="coerce")
-
-    # Join MoA labels (on compound + concentration)
-    moa_df = moa_df.copy()
-    moa_df["compound_clean"] = moa_df["compound"].astype(str).str.strip().str.lower()
-    moa_df["concentration_num"] = pd.to_numeric(
-        moa_df["concentration"], errors="coerce"
+    meta = fl_df[["plate", "well", "site_i", "compound", "moa"]].rename(
+        columns={"site_i": "site"}
     )
+    df = fields_df.merge(meta, on=["plate", "well", "site"], how="left")
 
-    df = df.merge(
-        moa_df[["compound_clean", "concentration_num", "moa"]].drop_duplicates(),
-        on=["compound_clean", "concentration_num"],
-        how="left",
-    )
+    df["compound"] = df["compound"].fillna("").str.strip()
+    df["moa"] = df["moa"].fillna("").str.strip()
 
-    # Fill missing MoA with "unknown"
-    df["moa"] = df["moa"].fillna("unknown")
+    # DMSO negative controls (moa == "dmso" in fl_data.csv).
+    df["is_dmso"] = df["moa"].str.lower() == config.DMSO_MOA_LABEL
 
-    # Join SMILES
-    if not compound_df.empty:
-        compound_df = compound_df.copy()
-        compound_df["compound_clean"] = (
-            compound_df["compound"].astype(str).str.strip().str.lower()
-        )
-        df = df.merge(
-            compound_df[["compound_clean", "smiles"]].drop_duplicates(),
-            on="compound_clean",
-            how="left",
-        )
+    # Human-readable treatment label. DMSO -> "DMSO"; unmatched -> broad id.
+    df["compound"] = df["compound"].replace("", np.nan)
+    df.loc[df["is_dmso"], "compound"] = "DMSO"
+    df["compound"] = df["compound"].fillna("unknown")
 
-    # Build local image paths
+    # MoA label. Keep the dataset's verbatim class names for the 10 MoAs;
+    # DMSO -> "DMSO"; unmatched fields -> "unknown". Downstream excludes DMSO
+    # via is_dmso and skips "unknown", so clustering sees exactly 10 classes.
+    df.loc[df["is_dmso"], "moa"] = "DMSO"
+    df["moa"] = df["moa"].replace("", "unknown")
+
+    # Single-concentration design: constant nominal concentration.
+    df["concentration"] = config.DEFAULT_CONCENTRATION
+    df.loc[df["is_dmso"], "concentration"] = 0.0
+
+    # Columns kept for schema compatibility with the shared downstream pipeline.
+    df["broad_sample"] = df["compound"]
+    df["pert_iname"] = df["compound"]
+    df["smiles"] = ""
+
     df = _build_image_paths(df)
-
-    # Identify DMSO controls
-    df["is_dmso"] = df["compound_clean"].str.lower().str.contains("dmso", na=False)
-
-    # Clean up
-    df = df.drop(columns=["compound_clean", "concentration_num"], errors="ignore")
-
     return df
 
 
 def _build_image_paths(df):
-    """Build local file paths for each channel image.
-
-    BBBC021 image paths from the CSV point to the original download location.
-    We map them to our organized directory structure:
-      images/{plate}/{channel}/{filename}
-    """
-    channel_file_cols = {
-        "DAPI": "Image_FileName_DAPI",
-        "Actin": "Image_FileName_Actin",
-        "Tubulin": "Image_FileName_Tubulin",
-    }
-
-    for ch, col in channel_file_cols.items():
-        path_col = f"path_{ch}"
-        if col in df.columns and "plate" in df.columns:
-            df[path_col] = df.apply(
-                lambda row: str(
-                    config.IMAGES_DIR / row["plate"] / ch / row[col]
-                ),
-                axis=1,
-            )
-        else:
-            df[path_col] = ""
-
+    """Add path_<CHANNEL> columns mirroring download.py's on-disk layout."""
+    channel_idx = {ch: i + 1 for i, ch in enumerate(config.CHANNEL_NAMES)}
+    for ch in config.CHANNEL_NAMES:
+        idx = channel_idx[ch]
+        df[f"path_{ch}"] = df.apply(
+            lambda r: str(config.IMAGES_DIR / r["plate"] / ch /
+                          f"{r['well']}_s{int(r['site'])}_w{idx}.tif"),
+            axis=1,
+        )
     return df
 
 
 def build_treatment_summary(df):
-    """Build treatment-level summary table.
-
-    One row per unique (compound, concentration) pair.
-    """
-    # Group by compound + concentration
+    """One row per treatment (compound). Single concentration -> compound level."""
     groups = df.groupby(["compound", "concentration"])
-
     records = []
     for (cpd, conc), group in groups:
         rec = {
             "compound": cpd,
             "concentration": conc,
             "n_images": len(group),
+            "n_wells": group["well"].nunique(),
             "n_plates": group["plate"].nunique(),
             "moa": group["moa"].iloc[0],
             "is_dmso": group["is_dmso"].iloc[0],
+            "broad_sample": group["broad_sample"].iloc[0],
+            "smiles": group["smiles"].iloc[0],
         }
-        if "smiles" in group.columns:
-            rec["smiles"] = group["smiles"].iloc[0]
         records.append(rec)
-
-    summary = pd.DataFrame(records)
-    return summary
-
-
-def get_dmso_profiles(df):
-    """Get all DMSO (negative control) field profiles for normalization."""
-    dmso = df[df["is_dmso"]]
-    print(f"  DMSO controls: {len(dmso)} fields of view")
-    return dmso
+    return pd.DataFrame(records)
 
 
 def print_statistics(df, summary_df):
-    """Print comprehensive dataset statistics."""
     print(f"\n{'=' * 60}")
-    print("BBBC021 Dataset Statistics")
+    print("U2OS-Cell-Painting Dataset Statistics")
     print(f"{'=' * 60}")
 
     print(f"\nTotal fields of view: {len(df):,}")
     print(f"Unique plates: {df['plate'].nunique()}")
-    print(f"Unique compounds: {df['compound'].nunique()}")
-    print(f"Unique concentrations: {sorted(df['concentration'].dropna().unique())}")
+    print(f"Unique wells: {df['well'].nunique()}")
+    print(f"Unique compounds (excl. DMSO): "
+          f"{df.loc[~df['is_dmso'], 'compound'].nunique()}")
 
-    # DMSO
     n_dmso = df["is_dmso"].sum()
     print(f"\nDMSO control fields: {n_dmso}")
 
-    # MoA distribution
-    moa_df = df[df["moa"] != "unknown"]
-    print(f"\nFields with MoA label: {len(moa_df):,} ({100*len(moa_df)/len(df):.1f}%)")
-
-    moa_counts = moa_df["moa"].value_counts()
+    moa_df = df[(df["moa"] != "unknown") & (df["moa"] != "DMSO")]
+    print(f"\nFields with MoA label: {len(moa_df):,} "
+          f"({100*len(moa_df)/max(len(df),1):.1f}%)")
     print(f"\nMoA Class Distribution ({moa_df['moa'].nunique()} classes):")
     print("-" * 50)
-    for moa, count in moa_counts.items():
-        n_cpds = moa_df[moa_df["moa"] == moa]["compound"].nunique()
-        print(f"  {moa:<35s} {n_cpds:3d} compounds, {count:5d} fields")
-
-    # Concentration distribution
-    conc_counts = df["concentration"].value_counts().sort_index()
-    print(f"\nConcentration Distribution:")
-    for conc, count in conc_counts.items():
-        print(f"  {conc:>10} : {count:5d} fields")
+    moa_counts = moa_df.groupby("moa")["compound"].nunique().sort_values(ascending=False)
+    for moa, n_cpds in moa_counts.items():
+        n_fields = (moa_df["moa"] == moa).sum()
+        print(f"  {moa:<40s} {n_cpds:2d} cpds, {n_fields:5d} fields")
 
     print(f"\n{'=' * 60}")
 
 
 def save_processed_data(df, summary_df, output_dir=None):
-    """Save processed tables to CSV."""
     output_dir = Path(output_dir) if output_dir else config.RESULTS_DIR / "preprocess"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Full image-level table
     full_path = output_dir / "image_table.csv"
     df.to_csv(full_path, index=False)
     print(f"  Saved: {full_path}")
 
-    # Treatment summary
     summary_path = output_dir / "treatment_summary.csv"
     summary_df.to_csv(summary_path, index=False)
     print(f"  Saved: {summary_path}")
 
-    # MoA-only summary (compounds with known MoA)
-    moa_summary = summary_df[summary_df["moa"] != "unknown"]
+    moa_summary = summary_df[(summary_df["moa"] != "unknown") &
+                             (summary_df["moa"] != "DMSO")]
     moa_path = output_dir / "moa_compounds.csv"
     moa_summary.to_csv(moa_path, index=False)
     print(f"  Saved: {moa_path} ({len(moa_summary)} treatments with MoA)")
 
 
-def run_preprocessing():
-    """Run full preprocessing pipeline."""
+def run_preprocessing(plates=None, on_disk=False):
     print("=" * 60)
-    print("BBBC021 Preprocessing")
+    print("U2OS-Cell-Painting Preprocessing")
     print("=" * 60)
 
-    # Load raw data
-    image_df = load_image_metadata()
-    moa_df = load_moa_labels()
-    compound_df = load_compound_smiles()
+    fl_df = load_fl_table()
+    if on_disk:
+        fields_df = discover_fields(plates=plates)
+    else:
+        fields_df = build_fields_from_table(fl_df, plates=plates)
 
-    # Build unified table
-    print(f"\nBuilding unified treatment table...")
-    df = build_unified_table(image_df, moa_df, compound_df)
+    if fields_df.empty:
+        print("\n[ERROR] No fields found. Check fl_data.csv / downloaded images.")
+        return fields_df, pd.DataFrame()
 
-    # Summary
+    print("\nBuilding unified image table...")
+    df = build_unified_table(fields_df, fl_df)
     summary_df = build_treatment_summary(df)
 
-    # Statistics
     print_statistics(df, summary_df)
 
-    # Save
-    print(f"\nSaving processed data...")
+    print("\nSaving processed data...")
     config.ensure_dirs()
     save_processed_data(df, summary_df)
-
     return df, summary_df
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Preprocess BBBC021 metadata")
+    parser = argparse.ArgumentParser(description="Preprocess U2OS-Cell-Painting metadata")
+    parser.add_argument("--plates", type=str, nargs="+", default=None,
+                        help="Restrict to specific plates (default: all 18)")
+    parser.add_argument("--on_disk", action="store_true",
+                        help="Only include fields whose images are on disk "
+                             "(default: build the full label table from fl_data.csv)")
     parser.add_argument("--stats", action="store_true",
                         help="Print statistics only")
     args = parser.parse_args()
 
-    df, summary_df = run_preprocessing()
+    df, summary_df = run_preprocessing(plates=args.plates, on_disk=args.on_disk)
 
-    if args.stats:
+    if args.stats and len(df):
         print_statistics(df, summary_df)
 
 

@@ -57,7 +57,7 @@ MicroAtlas can be used directly in the Cellpose GUI for interactive segmentation
 
 1. Launch the GUI:
    ```bash
-   python -m cellpose
+   python -m cellpose --gui
    ```
 2. In the menu bar, go to **Models → Add model**.
 3. Navigate to `src/microatlas/` and select the `microatlas` model file.
@@ -212,20 +212,6 @@ python spatch/eval_spatch.py
 python spatch/eval_spatch.py --models microatlas cellpose4
 ```
 
-### Counting evaluation
-
-Cell counting evaluation uses three [BBBC](https://bbbc.broadinstitute.org/) datasets (BBBC001, BBBC039, BBBC041). Dataset zip files are included under `src/counting/BBBC/`:
-
-```bash
-cd src/counting
-
-# Batch-run all five models on BBBC001 and BBBC041
-python batch_counting.py
-# Or run a single model or dataset
-python batch_counting.py --datasets BBBC001 --models microatlas
-# Available models: cellpose4, cellpose3, microatlas, microsam, cellsam
-```
-
 ### Spatial transcriptomics evaluation
 
 Spatial transcriptomics evaluation uses three Xenium datasets from [10x Genomics](https://www.10xgenomics.com/datasets). Due to their large size, the data is not included in the repository and must be downloaded separately.
@@ -304,36 +290,35 @@ python spatial_analysis/Xenium/eval.py --project all --models all
 
 ### Morphological profiling
 
-Morphological profiling evaluation uses the **BBBC021 dataset** from the [Broad Bioimage Benchmark Collection](https://bbbc.broadinstitute.org/BBBC021), a high-throughput fluorescence microscopy screen of MCF-7 breast cancer cells stained with three channels (DAPI, Actin, Tubulin). A library of 113 compounds was assayed at 8 concentrations across 13,200 fields (~44 GB). 38 compounds (103 compound–concentration pairs) are annotated with one of 12 Mechanisms of Action (MoA), plus DMSO as negative control. The pipeline benchmarks five segmentation models for their ability to preserve morphological signal, measured by how well downstream unsupervised clustering separates MoA classes.
+Morphological profiling evaluation uses the **U2OS-Cell-Painting dataset** ([figshare 21378906](https://doi.org/10.17044/scilifelab.21378906), Uppsala University, CC BY 4.0), a 5-channel Cell Painting screen of human U2OS osteosarcoma cells treated with 231 compounds at a single 10 µM dose, plus DMSO negative controls. The compounds span 10 balanced Mechanism of Action (MoA) classes across 18 plates × 5 sites = 7,710 fluorescence fields (2160×2160, uint16; channels: DNA, Mito, AGP, RNA, ER). The two original papers using this data perform supervised MoA classification; this pipeline instead performs unsupervised morphological clustering, so the numbers here are not comparable to the papers' supervised scores. The pipeline benchmarks five segmentation models for their ability to preserve morphological signal, measured by how well downstream unsupervised clustering separates MoA classes.
+
+**References (cite when using this data):**
+
+1. Gupta, Harrison, *et al.* "Is brightfield all you need for mechanism of action prediction?" *bioRxiv* 2022. DOI [10.1101/2022.10.12.511869](https://doi.org/10.1101/2022.10.12.511869)
+2. Tian, Harrison, *et al.* "Combining molecular and cell painting image data for mechanism of action prediction." *Artificial Intelligence in the Life Sciences*, 2023. DOI [10.1016/j.ailsci.2023.100060](https://doi.org/10.1016/j.ailsci.2023.100060)
 
 #### Download data
 
-Download metadata and plate images from [BBBC](https://bbbc.broadinstitute.org/BBBC021):
+Download metadata and plate images from [figshare](https://doi.org/10.17044/scilifelab.21378906). The full record is ~634 GB; each per-plate tar.gz bundles both fluorescence (FL) and brightfield (BF) data, and only the 5 FL channels are extracted.
 
 ```bash
-# Download metadata (~4 MB)
-python src/morphology_profiling/download.py --metadata_only
-
-# Download 1–2 plates for testing (~800 MB each)
-python src/morphology_profiling/download.py --plate Week1_22123
-
-# Download all 55 plates (~44 GB)
+# Download all 18 plates (metadata + per-plate FL images)
 python src/morphology_profiling/download.py --all
 ```
 
-Data is stored under `src/morphology_profiling/data/`: metadata CSVs in `metadata/`, plate images organized as `images/{plate}/DAPI|Actin|Tubulin/*.tif`.
+Data is stored under `src/morphology_profiling/data/`: `fl_data.csv` in `metadata/`, plate images organized as `images/{plate}/DNA|Mito|AGP|RNA|ER/*.tif`.
 
 #### Pipeline
 
 All scripts support `--models` to specify one or more models (`cellpose4`, `cellpose3`, `microatlas`, `microsam`, `cellsam`, or `all`).
 
-**Step 1 — Preprocess metadata:** Parse compound/concentration/MoA mappings and build a unified image table.
+**Step 1 — Preprocess metadata:** Build the unified image table from `fl_data.csv` (plate/well/site, compound, per-channel filenames and the single MoA label per field; no external platemap join needed).
 
 ```bash
 python src/morphology_profiling/preprocess.py
 ```
 
-**Step 2 — Segmentation:** Run instance segmentation for all fields.
+**Step 2 — Segmentation:** Run whole-cell instance segmentation for all fields (cytoplasm/membrane marker AGP paired with the DNA nucleus marker; single AGP marker for microsam).
 
 ```bash
 python src/morphology_profiling/segment.py --models microatlas --all
@@ -341,33 +326,47 @@ python src/morphology_profiling/segment.py --models microatlas --all
 
 Output: `results/masks/{model}/{plate}/{field}_mask.tif`.
 
-**Step 3 — Feature extraction:** Extract ~106 morphological features per cell across 6 categories:
+**Step 3 — Feature extraction:** Extract morphological features per cell across 6 categories:
 
-| Category | Description | Features |
-|---|---|---|
-| AreaShape | regionprops shape descriptors | 13 |
-| Intensity | batched ndimage stats + percentiles × 3ch | 38 |
-| Texture | Haralick GLCM on DAPI + Actin, 1 scale | 26 |
-| Granularity | multi-scale opening on DAPI, 5 scales | 5 |
-| RadialDistribution | binned radial intensity × 3ch | 12 |
-| Correlation | Pearson + Manders inter-channel | 12 |
+| Category | Description |
+|---|---|
+| AreaShape | regionprops shape descriptors |
+| Intensity | batched ndimage stats + percentiles × 5ch |
+| Texture | Haralick GLCM on DNA + RNA |
+| Granularity | multi-scale opening on DNA |
+| RadialDistribution | binned radial intensity × 5ch |
+| Correlation | Pearson + Manders inter-channel |
 
 ```bash
 python src/morphology_profiling/feature_extraction.py --models microatlas --all
 ```
 
-**Step 4 — Aggregation & normalization:** Aggregate single-cell features to field-level (median + MAD), robust z-score against DMSO controls, remove low-variance (< 0.01) and highly correlated (> 0.95) features.
+**Step 4 — Aggregation & normalization:** Aggregate single-cell features to field-level (median + MAD), robust z-score against per-plate DMSO controls, remove low-variance (< 0.01) and highly correlated (> 0.95) features.
 
 ```bash
 python src/morphology_profiling/feature_aggregation.py --models microatlas
 ```
 
-**Step 5 — Unsupervised clustering & evaluation:** Field-level profiles are reduced via PCA (50 dims) then UMAP (5D, cosine distance, `init=pca`), aggregated to treatment-level centroids, and clustered via HDBSCAN (density-based, no preset k). Quality is measured by Hungarian-matched Accuracy — the proportion of 87 valid treatments correctly assigned to their MoA class under optimal cluster-to-MoA mapping.
+**Step 5 — Unsupervised clustering & evaluation:** Field-level profiles are reduced via PCA (50 dims) then UMAP (5D, cosine distance), clustered via Agglomerative Clustering (ward linkage, k=10). Quality is measured by NMI and ARI.
 
 ```bash
 python src/morphology_profiling/biomarker/unsupervised.py --models microatlas
 ```
 
+
+### Counting evaluation
+
+Cell counting evaluation uses three [BBBC](https://bbbc.broadinstitute.org/) datasets (BBBC001, BBBC039, BBBC041). Dataset zip files are included under `src/counting/BBBC/`:
+
+```bash
+cd src/counting
+
+# Batch-run all five models on BBBC001 and BBBC041
+python batch_counting.py
+# Or run a single model or dataset
+python batch_counting.py --datasets BBBC001 --models microatlas
+# Available models: cellpose4, cellpose3, microatlas, microsam, cellsam
+```
 
 ### Multiplexed imaging cell phenotyping
 

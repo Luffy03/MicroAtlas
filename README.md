@@ -1,5 +1,5 @@
 <div align="center">
-<h1>MicroAtlas: Pushing the Limits of Cell Segmentation with Large-scale Unlabeled Microscopy Images</h1>
+<h1>Large‑Scale Unlabeled Microscopy Images Empower a Generalizable Cell Segmentation Foundation Model for Versatile Biological Analysis</h1>
 
 <a href='https://huggingface.co/datasets/MicroAtlas/MicroAtlas-2B'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Dataset-green' alt='Dataset'></a> <a href='https://huggingface.co/spaces/MicroAtlas/microatlas'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue' alt='Demo'></a>
 </div>

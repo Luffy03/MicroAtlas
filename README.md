@@ -56,7 +56,7 @@ MicroAtlas can be used directly in the Cellpose GUI for interactive segmentation
 
 1. Launch the GUI:
    ```bash
-   python -m cellpose --gui
+   python -m cellpose
    ```
 2. In the menu bar, go to **Models → Add model**.
 3. Navigate to `src/microatlas/` and select the `microatlas` model file.
